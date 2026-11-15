@@ -118,8 +118,21 @@ foreach ($asset in $picked.Assets) {
 
 $exe = Join-Path $InstallDir 'llama-server.exe'
 $works = $false
+$checkOutput = ''
 if (Test-Path -LiteralPath $exe) {
-    try { & $exe --version *> $null; $works = ($LASTEXITCODE -eq 0) } catch { $works = $false }
+    # llama-server prints its version to stderr. Windows PowerShell 5 turns redirected stderr
+    # into errors, which 'Stop' (top of this file) would treat as a failure, so relax it here.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $checkOutput = (& $exe --version 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $works = ($LASTEXITCODE -eq 0)
+        if (-not $works) { $checkOutput += "`n(exit code $LASTEXITCODE)" }
+    } catch {
+        $checkOutput = $_.Exception.Message
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 }
 if ($failed.Count -gt 0 -or -not $works) {
     Write-Host ''
@@ -127,7 +140,10 @@ if ($failed.Count -gt 0 -or -not $works) {
         Write-Host "Could not write these files into ${InstallDir}:" -ForegroundColor Red
         $failed | Select-Object -Unique | ForEach-Object { Write-Host "   $_" }
     }
-    if (-not $works) { Write-Host "llama-server.exe is missing or won't start." -ForegroundColor Red }
+    if (-not $works) {
+        Write-Host "llama-server.exe is missing or won't start." -ForegroundColor Red
+        if ($checkOutput) { Write-Host "What Windows said: $checkOutput" -ForegroundColor DarkGray }
+    }
     Write-Host ''
     Write-Host 'Nothing is running it any more, so this is almost always your antivirus blocking or' -ForegroundColor Yellow
     Write-Host 'quarantining llama.cpp (a common false positive). The download itself was verified above.' -ForegroundColor Yellow
