@@ -157,9 +157,11 @@ Write-Host ''
 $ip = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } |
        Select-Object -First 1).IPv4Address.IPAddress
 Write-Host "Done! This PC's IP address is: $ip" -ForegroundColor Green
-if ($wasRunning) {
-    Write-Host 'The model server was stopped for the update. Start it again with 2_start_server.bat,' -ForegroundColor Yellow
-    Write-Host 'or run start_all.ps1 (it also asks for the other PC''s IP and restarts the gateway).' -ForegroundColor Yellow
+Write-Host ''
+$startAll = Join-Path $PSScriptRoot 'start_all.ps1'
+if (Test-Path $startAll) {
+    $answer = Read-Host 'Start the AI server now (model server + gateway)? [Y/n]'
+    if ($answer -notmatch '^[nN]') { & $startAll }
 } else {
     Write-Host 'Next: double-click 2_start_server.bat'
 }
