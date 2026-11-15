@@ -1,5 +1,11 @@
 # Local AI server: one link for your whole Wi-Fi / LAN
 
+> [!WARNING]
+> **Student-grade project, provided as-is with no warranty and no liability.** Use it at your own risk.
+> See [DISCLAIMER.md](DISCLAIMER.md).
+
+![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 Each PC runs its own copy of the model. A small Python gateway on **this PC**
 gives you one link. Requests go to this PC first and switch to your
 **other PC** when this one is busy, overloaded or offline.
@@ -71,3 +77,12 @@ there and choose **2**.
   You can still reach the other PC directly at `http://<other PC's IP>:8080/v1`
   with the server key.
 - Don't port-forward these ports to the internet. Use Tailscale for access away from home.
+
+## License and disclaimer
+
+Released under the [MIT License](LICENSE) © 2026 DHURJATI-JS.
+
+**No warranty, no liability.** This software is provided "as is", without warranty of any kind. The author,
+developers and contributors are not liable for any damages, data loss, hardware damage or other loss arising
+from its use, and accept no responsibility for how it is used or for what the AI models generate.
+Full text: [DISCLAIMER.md](DISCLAIMER.md).
