@@ -65,18 +65,79 @@ if (-not $picked) {
 Write-Host "Using llama.cpp release: $($picked.Release.tag_name)"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
+# --- a running model server locks llama-server.exe and its DLLs: stop it first ---
+$wasRunning = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
+if ($wasRunning) {
+    Write-Host 'Stopping the running model server so it can be updated...' -ForegroundColor Yellow
+    $wasRunning | Stop-Process -Force
+    Start-Sleep -Seconds 2
+}
+# leftovers from an earlier update (files that were in use then)
+Get-ChildItem $InstallDir -Filter '*.old-*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+function Install-File([IO.FileInfo]$file) {
+    $dest = Join-Path $InstallDir $file.Name
+    for ($try = 1; $try -le 3; $try++) {
+        try { Copy-Item -LiteralPath $file.FullName -Destination $dest -Force -ErrorAction Stop; return $true }
+        catch { Start-Sleep -Seconds 2 }
+    }
+    # still locked: Windows lets you rename a file that is in use, so move it aside and copy again
+    if (Test-Path -LiteralPath $dest) {
+        try {
+            Rename-Item -LiteralPath $dest -NewName ('{0}.old-{1}' -f $file.Name, (Get-Date -Format 'yyyyMMddHHmmss')) -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $file.FullName -Destination $dest -Force -ErrorAction Stop
+            return $true
+        } catch {}
+    }
+    return $false
+}
+
+$failed = @()
 foreach ($asset in $picked.Assets) {
     $zip = Join-Path $env:TEMP $asset.name
     $tmp = Join-Path $env:TEMP ('llama_extract_' + [guid]::NewGuid())
     Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB)) MB)..."
     Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+    # GitHub publishes a SHA-256 for every release file: make sure the download isn't damaged
+    if ($asset.digest -and "$($asset.digest)".StartsWith('sha256:')) {
+        $expected = "$($asset.digest)".Substring(7).ToLower()
+        $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+        if ($actual -ne $expected) {
+            Remove-Item $zip -Force -ErrorAction SilentlyContinue
+            throw "The download of $($asset.name) is damaged (SHA-256 mismatch). Run this again."
+        }
+        Write-Host '  SHA-256 verified - this is the official, undamaged file.' -ForegroundColor DarkGreen
+    }
     Expand-Archive $zip -DestinationPath $tmp -Force
     # flatten so llama-server.exe and the CUDA DLLs always end up side by side in C:\llama
-    Get-ChildItem $tmp -Recurse -File | Copy-Item -Destination $InstallDir -Force
-    Remove-Item $zip, $tmp -Recurse -Force
+    foreach ($f in Get-ChildItem $tmp -Recurse -File) {
+        if (-not (Install-File $f)) { $failed += $f.Name }
+    }
+    Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-if (-not (Test-Path "$InstallDir\llama-server.exe")) { throw "llama-server.exe not found in $InstallDir" }
+$exe = Join-Path $InstallDir 'llama-server.exe'
+$works = $false
+if (Test-Path -LiteralPath $exe) {
+    try { & $exe --version *> $null; $works = ($LASTEXITCODE -eq 0) } catch { $works = $false }
+}
+if ($failed.Count -gt 0 -or -not $works) {
+    Write-Host ''
+    if ($failed.Count -gt 0) {
+        Write-Host "Could not write these files into ${InstallDir}:" -ForegroundColor Red
+        $failed | Select-Object -Unique | ForEach-Object { Write-Host "   $_" }
+    }
+    if (-not $works) { Write-Host "llama-server.exe is missing or won't start." -ForegroundColor Red }
+    Write-Host ''
+    Write-Host 'Nothing is running it any more, so this is almost always your antivirus blocking or' -ForegroundColor Yellow
+    Write-Host 'quarantining llama.cpp (a common false positive). The download itself was verified above.' -ForegroundColor Yellow
+    Write-Host 'In Bitdefender: Protection > Antivirus > Open > Settings:'
+    Write-Host '  - Manage quarantine: restore llama-server.exe (turn on "Create exception for the restored files")'
+    Write-Host "  - or Manage exceptions > Add an exception > $InstallDir"
+    Write-Host 'Then run 1_setup_this_pc.bat again.'
+    exit 1
+}
+Write-Host "llama.cpp installed in $InstallDir and working." -ForegroundColor Green
 
 # --- firewall: allow other devices on your home network ---
 foreach ($port in 8080, 8000) {
@@ -96,4 +157,9 @@ Write-Host ''
 $ip = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } |
        Select-Object -First 1).IPv4Address.IPAddress
 Write-Host "Done! This PC's IP address is: $ip" -ForegroundColor Green
-Write-Host 'Next: double-click 2_start_server.bat'
+if ($wasRunning) {
+    Write-Host 'The model server was stopped for the update. Start it again with 2_start_server.bat,' -ForegroundColor Yellow
+    Write-Host 'or run start_all.ps1 (it also asks for the other PC''s IP and restarts the gateway).' -ForegroundColor Yellow
+} else {
+    Write-Host 'Next: double-click 2_start_server.bat'
+}
