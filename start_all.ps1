@@ -53,7 +53,7 @@ function Read-WithTimeout([string]$prompt, [int]$seconds) {
     return $null
 }
 
-# "223" -> 192.168.0.223 (same network as this PC); "1.50" -> 192.168.1.50; full IPs as they are.
+# A short answer is completed with this PC's network: "50" -> a.b.c.50, "1.50" -> a.b.1.50; full IPs as they are.
 function Resolve-Ip([string]$text, [string[]]$prefix) {
     $text = $text.Trim()
     if ($text -notmatch '^\d{1,3}(\.\d{1,3}){0,3}$') { return $null }
