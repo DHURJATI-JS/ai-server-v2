@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 # saved at every boot by start_all.ps1 (machine-specific)
 other_pc_ip.txt
+# the gateway's keys - created on first start, never commit them
+gateway-keys.json

@@ -2,13 +2,20 @@
 
 Setup:  pip install openai
 """
+import json
+from pathlib import Path
+
 from openai import OpenAI
+
+# On the gateway PC the key is read from gateway-keys.json; on other devices paste your lan_key.
+KEYS = Path(__file__).with_name("gateway-keys.json")
+LAN_KEY = json.loads(KEYS.read_text(encoding="utf-8"))["lan_key"] if KEYS.exists() else "paste-your-lan-key"
 
 client = OpenAI(
     # On the gateway PC itself you can use localhost.
     # From other devices use: http://<gateway PC's IP>:8000/v1
     base_url="http://localhost:8000/v1",
-    api_key="change-me-gateway-key",   # GATEWAY_API_KEY in gateway.py
+    api_key=LAN_KEY,
 )
 
 

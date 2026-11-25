@@ -19,7 +19,9 @@ professional, audited or production-ready product.
 - Output from AI models can be wrong, biased or unsafe. Check it before you rely on it.
 - The setup script downloads third-party software (llama.cpp) and models (Gemma). Their own licences and
   terms apply, and following them is your responsibility.
-- Change the default `change-me-...` keys before you use it. Don't expose the gateway to the internet
-  without a strong key; you do that at your own risk.
+- The gateway makes its own random keys in `gateway-keys.json`; keep that file private and change the
+  model server's `change-me-server-key` (in `2_start_server.bat` and `server_key`) before you use it.
+  Only expose the gateway to the internet through its internet door (port 8001, `internet_key`); you
+  do that at your own risk.
 
 By using, copying or modifying this software you accept this disclaimer.

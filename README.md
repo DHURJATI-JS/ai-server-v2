@@ -27,8 +27,11 @@ first choice       used when this PC is busy or down
 1. Right-click **`1_setup_this_pc.bat`** and choose **Run as administrator**.
    It detects your GPU, downloads llama.cpp into `C:\llama`, opens the firewall
    for your home network and prints this PC's IP address.
-2. Open `2_start_server.bat` and `gateway.py` and change the
-   `change-me-...` keys. (`OTHER_PC_IP` is asked at startup, see step 5.)
+2. **Keys:** the first time the gateway starts it creates **`gateway-keys.json`** next to it
+   (git-ignored, keep it private). `lan_key` is what your own devices send on your Wi-Fi;
+   `internet_key` is a long random key for the Cloudflare tunnel that nobody needs to see;
+   `server_key` must equal `API_KEY` in `2_start_server.bat` on **both** PCs (change both together).
+   (`OTHER_PC_IP` is asked at startup, see step 5.)
 3. Double-click **`2_start_server.bat`**. The first run downloads Gemma 3 12B (~8 GB).
    Wait for `server is listening`.
 4. Double-click **`3_start_gateway.bat`**. This needs Python installed.
@@ -36,7 +39,8 @@ first choice       used when this PC is busy or down
    From then on, every time you log in a window asks for the other PC's IP: type just the
    last digits (`223` = same network as this PC) or the full IP, or press Enter / wait 60 s
    to keep the last one. It then starts the model server and the gateway (`start_all.ps1`),
-   and restarts the Cloudflare tunnel so it forwards to this gateway (`http://127.0.0.1:8000`).
+   and restarts the Cloudflare tunnel so it forwards to this gateway's **internet door**
+   (`http://127.0.0.1:8001`, this PC only, internet key only - `/status` isn't reachable through it).
    Run `start_all.ps1` by hand any time to change the IP. Remove with
    `powershell -ExecutionPolicy Bypass -File install_startup.ps1 -Remove`.
 
@@ -50,7 +54,7 @@ there and choose **2**.
 ## Using it
 
 - **Python:** see `client.py`. Use `pip install openai`, then point `base_url` at
-  `http://<this PC's IP>:8000/v1` with your gateway key.
+  `http://<this PC's IP>:8000/v1` with your `lan_key` (from `gateway-keys.json`).
 - **Check what's happening:** open `http://<this PC's IP>:8000/status` in any browser.
   It shows which PCs are online and how many slots are busy.
 - Every reply carries an `x-served-by` header (`this-pc` or `other-pc`).
@@ -77,6 +81,16 @@ there and choose **2**.
   You can still reach the other PC directly at `http://<other PC's IP>:8080/v1`
   with the server key.
 - Don't port-forward these ports to the internet. Use Tailscale for access away from home.
+- **Two doors:** port `8000` is for your LAN (`lan_key`). Port `8001` listens on this PC only and
+  is the Cloudflare tunnel's door: it accepts **only** `internet_key`. Anything that arrives through
+  Cloudflare needs `internet_key` on either port, and the API docs are switched off.
+- **What the internet door lets in:** only `POST /v1/chat/completions` and `GET /v1/models`, with a
+  JSON body of at most 256 KB, text-only messages and a short list of known fields. Uploads, files,
+  images, audio, tools, streaming, compressed bodies and every other endpoint are refused before
+  they reach llama.cpp. The request is rebuilt from the checked fields (none of the caller's headers
+  are passed on), answers are trimmed to the text (no version or timing details), there's a limit of
+  60 requests a minute, and an address that sends 10 wrong keys is blocked for 30 minutes. Nothing
+  that comes in is saved or run. The limits are at the top of `gateway.py`.
 
 ## License and disclaimer
 

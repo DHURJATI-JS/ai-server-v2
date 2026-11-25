@@ -44,7 +44,7 @@ Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settin
 Write-Host "Done: '$name' now runs every time you log in." -ForegroundColor Green
 
 if ($choice -eq '1') {
-    # Restart the Cloudflare tunnel so it uses the gateway on this PC (http://127.0.0.1:8000).
+    # Restart the Cloudflare tunnel so it uses this PC's gateway (its internet door, http://127.0.0.1:8001).
     if (Get-ScheduledTask -TaskName $tunnelTask -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $tunnelTask -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2

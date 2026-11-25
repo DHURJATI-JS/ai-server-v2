@@ -5,7 +5,8 @@
 #    2. starts the model server (2_start_server.bat, port 8080)
 #    3. starts the gateway      (3_start_gateway.bat, port 8000)
 #  The Cloudflare tunnel (my website\scripts\start-tunnel.ps1) is its own
-#  startup task and forwards to this gateway at http://127.0.0.1:8000.
+#  startup task and forwards to this gateway's internet door, http://127.0.0.1:8001
+#  (it only accepts the secret internet key from gateway-keys.json).
 #
 #  Runs at every logon once you have run 4_install_startup.bat.
 #  Run by hand any time:  powershell -ExecutionPolicy Bypass -File start_all.ps1
@@ -157,8 +158,9 @@ if (Test-Port '127.0.0.1' 8000) {
 Write-Host "          Other PC: $otherIp"
 $tunnelLog = Join-Path $env:LOCALAPPDATA 'portfolio-tunnel\tunnel.log'
 if (Test-Path $tunnelLog) {
-    $last = Select-String -Path $tunnelLog -Pattern 'Tunnel up: (\S+)' | Select-Object -Last 1
-    if ($last) { Write-Host "          Cloudflare tunnel: $($last.Matches[0].Groups[1].Value) -> this gateway" }
+    $last = Select-String -Path $tunnelLog -Pattern 'Tunnel up' | Select-Object -Last 1
+    # The tunnel's address is kept private (only your website's backend can read it).
+    if ($last) { Write-Host "          Cloudflare tunnel: up -> this gateway's internet door (port 8001)" }
 }
 Write-Host ''
 Write-Host '  This window closes in 30 seconds.'
