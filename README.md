@@ -40,7 +40,7 @@ first choice       used when this PC is busy or down
    last digits (`223` = same network as this PC) or the full IP, or press Enter / wait 60 s
    to keep the last one. It then starts the model server and the gateway (`start_all.ps1`),
    and restarts the Cloudflare tunnel so it forwards to this gateway's **internet door**
-   (`http://127.0.0.1:8001`, this PC only, internet key only - `/status` isn't reachable through it).
+   (`http://127.0.0.1:8001`, this PC only, signed requests only - `/status` isn't reachable through it).
    Run `start_all.ps1` by hand any time to change the IP. Remove with
    `powershell -ExecutionPolicy Bypass -File install_startup.ps1 -Remove`.
 
@@ -82,10 +82,13 @@ there and choose **2**.
   with the server key.
 - Don't port-forward these ports to the internet. Use Tailscale for access away from home.
 - **Two doors:** port `8000` is for your LAN (`lan_key`). Port `8001` listens on this PC only and
-  is the Cloudflare tunnel's door: it accepts **only** `internet_key`. Anything that arrives through
-  Cloudflare needs `internet_key` on either port, and the API docs are switched off.
-- **What the internet door lets in:** only `POST /v1/chat/completions` and `GET /v1/models`, with a
-  JSON body of at most 256 KB, text-only messages and a short list of known fields. Uploads, files,
+  is the Cloudflare tunnel's door: it accepts **only** requests signed with `internet_key`. Anything that
+  arrives through Cloudflare gets that door's rules on either port, and the API docs are switched off.
+- **What the internet door lets in:** only `POST /v1/chat/completions` and `GET /v1/models`, **signed**
+  with `internet_key` (HMAC-SHA256 over the time, a one-time nonce and the body - the key itself is never
+  sent; requests older than 5 minutes, replayed or changed are refused, and every answer is signed back),
+  with a JSON body of at most 256 KB, text-only messages and a short list of known fields. This PC's clock
+  must be right (Windows syncs it by itself). Uploads, files,
   images, audio, tools, streaming, compressed bodies and every other endpoint are refused before
   they reach llama.cpp. The request is rebuilt from the checked fields (none of the caller's headers
   are passed on), answers are trimmed to the text (no version or timing details), there's a limit of

@@ -6,7 +6,7 @@
 #    3. starts the gateway      (3_start_gateway.bat, port 8000)
 #  The Cloudflare tunnel (my website\scripts\start-tunnel.ps1) is its own
 #  startup task and forwards to this gateway's internet door, http://127.0.0.1:8001
-#  (it only accepts the secret internet key from gateway-keys.json).
+#  (it only accepts requests signed with the secret internet key from gateway-keys.json).
 #
 #  Runs at every logon once you have run 4_install_startup.bat.
 #  Run by hand any time:  powershell -ExecutionPolicy Bypass -File start_all.ps1

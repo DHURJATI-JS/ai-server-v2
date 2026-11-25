@@ -12,16 +12,21 @@ Link:  http://<this PC's IP>:8000/v1       (OpenAI-compatible, for your Wi-Fi / 
 Check: http://<this PC's IP>:8000/status   (open in any browser on your LAN)
 
 Two doors, two keys (both kept in gateway-keys.json next to this file - never in git):
-  * port 8000, your LAN:   lan_key - the key your own devices and apps use.
+  * port 8000, your LAN:   lan_key - the key your own devices and apps use. Unchanged:
+    every endpoint is passed through exactly as before.
   * port 8001, this PC only (127.0.0.1): the door for the Cloudflare tunnel, i.e. the
-    internet. It accepts ONLY internet_key, a long random key made on first start that
-    nobody needs to see (the tunnel script hands it to your website, encrypted).
-    /status and the API docs are not reachable through it.
-Any request that arrives through Cloudflare (it carries Cloudflare's headers) needs the
-internet key on either port, so pointing the tunnel at the wrong port is still safe.
+    internet. It accepts ONLY requests SIGNED with internet_key, a long random key made on
+    first start that nobody needs to see (the tunnel script hands it to your website,
+    encrypted). The key itself never travels over the internet: each request carries an
+    HMAC-SHA256 signature over its time, a one-time nonce and its body, so a copied request
+    can't be replayed or changed, and every answer is signed back so the website knows it
+    came from this gateway. /status and the API docs are not reachable through it.
+Any request that arrives through Cloudflare (it carries Cloudflare's headers) gets the
+internet door's rules on either port, so pointing the tunnel at the wrong port is still safe.
 
 What the internet door lets in (everything else is refused before it reaches llama.cpp):
-  * only POST /v1/chat/completions and GET /v1/models, with internet_key;
+  * only POST /v1/chat/completions and GET /v1/models, correctly signed and at most
+    5 minutes old (this PC's clock must be right), each signature used once;
   * only a small JSON body (256 KB), text-only messages, a short list of known fields -
     no files, uploads, images, audio, tools or other endpoints; the request is rebuilt
     from the checked fields, and none of the caller's headers are passed on;
@@ -31,6 +36,7 @@ Nothing that comes in is ever saved to disk or run.
 """
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -47,8 +53,8 @@ from pathlib import Path
 import httpx
 import psutil
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 # ============================ settings ============================
 GATEWAY_PORT = 8000                         # your Wi-Fi / LAN
@@ -67,6 +73,7 @@ INTERNET_PER_MINUTE = 60                    # requests a minute, all callers tog
 INTERNET_MAX_INFLIGHT = 4                   # requests at the same time
 INTERNET_BAD_KEYS = 10                      # wrong keys from one address within 10 minutes ...
 INTERNET_BLOCK_SECONDS = 30 * 60            # ... block that address for 30 minutes
+INTERNET_CLOCK_WINDOW = 300                 # seconds a signed request may be old (or early)
 # ==================================================================
 
 
@@ -224,13 +231,9 @@ def via_internet(request: Request) -> bool:
 
 
 def check_key(request: Request) -> None:
-    sent = request.headers.get("authorization", "")
-    if via_internet(request):
-        ok = bool(KEYS["internet"]) and hmac.compare_digest(sent, f"Bearer {KEYS['internet']}")
-    else:
-        ok = (not KEYS["lan"] or hmac.compare_digest(sent, f"Bearer {KEYS['lan']}")
-              or hmac.compare_digest(sent, f"Bearer {KEYS['internet']}"))
-    if not ok:
+    """The LAN door: lan_key, as always. (internet_key only works signed, on the internet door.)"""
+    sent = request.headers.get("authorization", "").encode("latin-1", "replace")
+    if KEYS["lan"] and not hmac.compare_digest(sent, f"Bearer {KEYS['lan']}".encode("utf-8")):
         raise HTTPException(401, "Wrong or missing API key")
 
 # ===================== the internet door's rules =====================
@@ -275,6 +278,7 @@ def address(request: Request) -> str:
 
 
 bad_keys: dict[str, deque] = {}             # address -> times of its recent wrong keys
+nonces: dict[str, float] = {}               # one-time values already used -> forget after (monotonic)
 blocked: dict[str, float] = {}              # address -> blocked until (monotonic)
 recent: deque = deque()                     # times of accepted requests (last minute)
 internet_inflight = 0
@@ -427,56 +431,91 @@ def _no_constants(name: str):
     raise ValueError(f"{name} is not allowed")
 
 
-async def admit(request: Request, path: str) -> tuple[str, str, bytes]:
-    """Every check for a request from the internet. Returns (method, path, clean body)."""
+OFFERED = {("GET", "models"), ("POST", "chat/completions")}
+HEX32 = re.compile(r"[0-9a-f]{32}")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def signed(*parts: str) -> str:
+    """HMAC-SHA256 with internet_key over the parts (the website computes the same)."""
+    return hmac.new(KEYS["internet"].encode("utf-8"), "\n".join(parts).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def forget_old_nonces(now: float) -> None:
+    if len(nonces) > 1000:
+        for k in [k for k, until in nonces.items() if until <= now]:
+            del nonces[k]
+        if len(nonces) > 20_000:            # only reachable with the key; stay bounded
+            nonces.clear()
+
+
+async def admit(request: Request, path: str) -> tuple[str, str, bytes, str]:
+    """Every check for a request from the internet. Returns (method, path, clean body, nonce)."""
     now = time.monotonic()
     who = address(request)
     if blocked.get(who, 0) > now:
         raise refuse(403, "blocked address")
-    sent = request.headers.get("authorization", "")
-    if not (KEYS["internet"] and hmac.compare_digest(sent.encode(), f"Bearer {KEYS['internet']}".encode())):
+    route = (request.method, path)
+    stamp = request.headers.get("x-gateway-time", "")
+    nonce = request.headers.get("x-gateway-nonce", "")
+    sig = request.headers.get("x-gateway-signature", "")
+    if (route not in OFFERED or not KEYS["internet"] or not stamp.isdigit() or len(stamp) > 12
+            or not HEX32.fullmatch(nonce) or not HEX64.fullmatch(sig)):
+        remember_bad_key(who, now)          # unsigned, or a way in that isn't offered: same answer
+        raise refuse(401, "unsigned request" if route in OFFERED else f"{request.method} /v1/{path[:60]} isn't offered")
+    body = await read_body(request) if route == ("POST", "chat/completions") else b""
+    want = signed("gw1", request.method, f"/v1/{path}", stamp, nonce, hashlib.sha256(body).hexdigest())
+    if not hmac.compare_digest(want.encode(), sig.encode()):
         remember_bad_key(who, now)
-        raise refuse(401, "wrong or missing key")
+        raise refuse(401, "wrong signature")
+    skew = int(stamp) - int(time.time())
+    if abs(skew) > INTERNET_CLOCK_WINDOW:  # a real signature, but too old (or this PC's clock is off)
+        note(f"refused a signed request {skew:+d} s off - if that keeps happening, check this PC's clock "
+             "(Settings > Time & language > Sync now)", "clock")
+        raise Refused(401, PUBLIC_REASON[401])
+    forget_old_nonces(now)
+    if nonce in nonces:
+        remember_bad_key(who, now)
+        raise refuse(401, "replayed request")
+    nonces[nonce] = now + 2 * INTERNET_CLOCK_WINDOW
     bad_keys.pop(who, None)
     while recent and now - recent[0] > 60:
         recent.popleft()
     if len(recent) >= INTERNET_PER_MINUTE or internet_inflight > INTERNET_MAX_INFLIGHT:  # counts itself
         raise refuse(429, "too many requests")
-    if (request.method, path) == ("GET", "models"):
+    if route == ("GET", "models"):
         recent.append(now)
-        return "GET", "models", b""
-    if (request.method, path) != ("POST", "chat/completions"):
-        raise refuse(404, f"{request.method} /v1/{path[:60]} is not offered")
+        return "GET", "models", b"", nonce
     kind = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if kind != "application/json":
         raise refuse(415, f"content-type {kind[:40]!r}")
     if request.headers.get("content-encoding", "identity").strip().lower() != "identity":
         raise refuse(415, "compressed body")
-    body = await read_body(request)
     try:
         data = json.loads(body.decode("utf-8"), parse_constant=_no_constants)
         clean = clean_chat(data)
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise refuse(400, str(exc)[:120] or "bad JSON") from None
     recent.append(now)
-    return "POST", "chat/completions", json.dumps(clean, ensure_ascii=False).encode("utf-8")
+    return "POST", "chat/completions", json.dumps(clean, ensure_ascii=False).encode("utf-8"), nonce
 
 
-def trimmed_reply(path: str, status: int, raw: bytes) -> JSONResponse:
+def trimmed_reply(path: str, status: int, raw: bytes) -> tuple[int, dict]:
     """Only the answer goes back out - no model-server version, timings or file names."""
     if status != 200:
         note(f"model server answered HTTP {status}: {raw[:160].decode('utf-8', 'replace')!r}", "upstream")
         code = 502 if status in (401, 403) else status
-        return JSONResponse({"error": {"message": "The model server could not answer this request.", "code": code}},
-                            status_code=code)
+        return code, {"error": {"message": "The model server could not answer this request.", "code": code}}
     try:
         data = json.loads(raw)
     except ValueError:
-        return JSONResponse({"error": {"message": "Bad reply from the model server.", "code": 502}}, status_code=502)
+        return 502, {"error": {"message": "Bad reply from the model server.", "code": 502}}
+    if not isinstance(data, dict):
+        return 502, {"error": {"message": "Bad reply from the model server.", "code": 502}}
     if path == "models":
         ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)]
         safe = [i for i in ids if isinstance(i, str) and NAME_RE.fullmatch(i)][:8]
-        return JSONResponse({"object": "list", "data": [{"id": i, "object": "model"} for i in safe]})
+        return 200, {"object": "list", "data": [{"id": i, "object": "model"} for i in safe]}
     choices = []
     for c in data.get("choices") or []:
         if not isinstance(c, dict):
@@ -491,7 +530,7 @@ def trimmed_reply(path: str, status: int, raw: bytes) -> JSONResponse:
     if isinstance(usage, dict):
         out["usage"] = {k: usage[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")
                         if isinstance(usage.get(k), int)}
-    return JSONResponse(out)
+    return 200, out
 # =====================================================================
 
 DROP_REQUEST_HEADERS = {"host", "content-length", "authorization", "connection", "transfer-encoding", "keep-alive"}
@@ -545,11 +584,11 @@ async def open_upstream(method: str, path: str, *, headers: dict, body: bytes, p
         return upstream, b
 
 
-async def from_internet(path: str, request: Request) -> JSONResponse:
+async def from_internet(path: str, request: Request) -> Response:
     global internet_inflight
     internet_inflight += 1
     try:
-        method, path, body = await admit(request, path)
+        method, path, body, nonce = await admit(request, path)
         # A fresh request: none of the caller's headers, only our own.
         headers = {"authorization": f"Bearer {KEYS['server']}"}
         if body:
@@ -566,7 +605,12 @@ async def from_internet(path: str, request: Request) -> JSONResponse:
             b.inflight -= 1
     finally:
         internet_inflight -= 1
-    return trimmed_reply(path, upstream.status_code, bytes(raw))
+    status, payload = trimmed_reply(path, upstream.status_code, bytes(raw))
+    out = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # Signed back: the website only trusts an answer that this gateway signed for its own nonce.
+    proof = signed("gw1-reply", nonce, str(status), hashlib.sha256(out).hexdigest())
+    return Response(content=out, status_code=status, media_type="application/json",
+                    headers={"x-gateway-reply": proof})
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
